@@ -1,16 +1,59 @@
+/**
+ * @fileoverview Election Guide — Interactive Election Process Assistant.
+ * Core application module handling chat interface, NLP-based query routing,
+ * multi-country election data, and interactive UI components.
+ *
+ * @module app
+ * @version 1.0.0
+ * @requires security.js
+ * @requires firebase-config.js
+ */
+
+'use strict';
+
 // ============================================================
-// Election Guide — Interactive Assistant
+// DOM ELEMENT CACHE (performance: avoid repeated queries)
 // ============================================================
 
+/** @type {HTMLElement} Container for chat messages */
 const messagesEl = document.getElementById('messages');
+/** @type {HTMLElement} Container for quick action buttons */
 const quickActionsEl = document.getElementById('quick-actions');
+/** @type {HTMLInputElement} User text input field */
 const userInput = document.getElementById('user-input');
+/** @type {HTMLButtonElement} Send message button */
 const btnSend = document.getElementById('btn-send');
+/** @type {HTMLButtonElement} Reset/start over button */
 const btnReset = document.getElementById('btn-reset');
+/** @type {HTMLElement} Scrollable chat area */
 const chatArea = document.getElementById('chat-area');
 
+// ============================================================
+// SECURITY & ANALYTICS INITIALIZATION
+// ============================================================
+
+/** @type {Sanitizer} HTML sanitizer instance for XSS protection */
+const sanitizer = (typeof Sanitizer !== 'undefined') ? new Sanitizer() : null;
+
+/** @type {InputValidator} Input validator for length/content checks */
+const inputValidator = (typeof InputValidator !== 'undefined') ? new InputValidator({ maxLength: 500 }) : null;
+
+/** @type {RateLimiter} Rate limiter to prevent input spam */
+const rateLimiter = (typeof RateLimiter !== 'undefined') ? new RateLimiter({ maxRequests: 10, windowMs: 10000 }) : null;
+
+/** @type {ElectionAnalytics} Analytics tracker instance */
+const analytics = (typeof ElectionAnalytics !== 'undefined') ? new ElectionAnalytics() : null;
+
+// ============================================================
+// APPLICATION STATE
+// ============================================================
+
+/** @type {string|null} Currently selected country key */
 let currentCountry = null;
+/** @type {string} Current conversation state ('welcome'|'country-select'|'menu') */
 let conversationState = 'welcome';
+/** @type {number} Debounce timer ID for input handling */
+let debounceTimer = null;
 
 // ============================================================
 // KNOWLEDGE BASE
@@ -124,10 +167,23 @@ const ELECTION_DATA = {
   }
 };
 
+// Deep-freeze election data to prevent tampering
+Object.freeze(ELECTION_DATA);
+Object.keys(ELECTION_DATA).forEach(function(key) { Object.freeze(ELECTION_DATA[key]); });
+
 // ============================================================
 // MESSAGE RENDERING
 // ============================================================
+
+/**
+ * Creates and appends a message bubble to the chat.
+ * Uses DocumentFragment for efficient DOM insertion.
+ *
+ * @param {('bot'|'user')} type - Message sender type
+ * @param {string} html - HTML content for the message body
+ */
 function addMessage(type, html) {
+  const fragment = document.createDocumentFragment();
   const msg = document.createElement('div');
   msg.className = `message message--${type}`;
   const avatar = type === 'bot' ? '🗳️' : '👤';
@@ -135,23 +191,40 @@ function addMessage(type, html) {
     <div class="message__avatar">${avatar}</div>
     <div class="message__body">${html}</div>
   `;
-  messagesEl.appendChild(msg);
+  fragment.appendChild(msg);
+  messagesEl.appendChild(fragment);
+  announceToScreenReader(type === 'bot' ? 'New assistant message' : 'Message sent');
   scrollToBottom();
 }
 
+/**
+ * Adds a bot message with a typing indicator delay.
+ *
+ * @param {string} html - HTML content for the bot message
+ * @param {number} [delay=600] - Delay in ms before showing the message
+ */
 function addBotMessage(html, delay = 600) {
   showTyping();
   setTimeout(() => {
     hideTyping();
-    addMessage('bot', html);
+    const safeHTML = sanitizer ? sanitizer.sanitize(html) : html;
+    addMessage('bot', safeHTML);
     scrollToBottom();
   }, delay);
 }
 
+/**
+ * Adds a user message to the chat.
+ *
+ * @param {string} text - Raw user text (will be escaped)
+ */
 function addUserMessage(text) {
   addMessage('user', `<p>${escapeHTML(text)}</p>`);
 }
 
+/**
+ * Shows the typing indicator animation.
+ */
 function showTyping() {
   const el = document.createElement('div');
   el.className = 'message message--bot';
@@ -164,40 +237,79 @@ function showTyping() {
   scrollToBottom();
 }
 
+/** Hides the typing indicator. */
 function hideTyping() {
   const el = document.getElementById('typing-msg');
-  if (el) el.remove();
+  if (el) { el.remove(); }
 }
 
+/** Smoothly scrolls the chat area to the bottom. */
 function scrollToBottom() {
   requestAnimationFrame(() => {
     chatArea.scrollTop = chatArea.scrollHeight;
   });
 }
 
+/**
+ * Escapes HTML special characters to prevent XSS.
+ * Uses the Sanitizer module if available, falls back to DOM-based escaping.
+ *
+ * @param {string} str - Raw string to escape
+ * @returns {string} HTML-escaped string
+ */
 function escapeHTML(str) {
+  if (typeof Sanitizer !== 'undefined' && Sanitizer.escapeHTML) {
+    return Sanitizer.escapeHTML(str);
+  }
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
 }
 
+/**
+ * Announces a message to screen readers via ARIA live region.
+ *
+ * @param {string} message - Text to announce
+ */
+function announceToScreenReader(message) {
+  const liveRegion = document.getElementById('aria-live-region');
+  if (liveRegion) {
+    liveRegion.textContent = message;
+    setTimeout(() => { liveRegion.textContent = ''; }, 1000);
+  }
+}
+
 // ============================================================
 // QUICK ACTIONS
 // ============================================================
+
+/**
+ * Renders quick action buttons in the actions bar.
+ * Uses DocumentFragment for batch DOM insertion.
+ *
+ * @param {Array<{emoji: string, label: string, handler: Function}>} actions - Action button configs
+ */
 function setQuickActions(actions) {
   quickActionsEl.innerHTML = '';
+  const fragment = document.createDocumentFragment();
   actions.forEach(a => {
     const btn = document.createElement('button');
     btn.className = 'quick-action-btn';
-    btn.innerHTML = `<span class="emoji">${a.emoji}</span> ${a.label}`;
+    btn.setAttribute('aria-label', a.label);
+    btn.innerHTML = `<span class="emoji" aria-hidden="true">${a.emoji}</span> ${a.label}`;
     btn.addEventListener('click', () => {
       addUserMessage(a.label);
+      if (analytics) { analytics.logEvent('quick_action_used', { label: a.label }); }
       a.handler();
     });
-    quickActionsEl.appendChild(btn);
+    fragment.appendChild(btn);
   });
+  quickActionsEl.appendChild(fragment);
 }
 
+/**
+ * Clears all quick action buttons from the actions bar.
+ */
 function clearQuickActions() {
   quickActionsEl.innerHTML = '';
 }
@@ -205,6 +317,13 @@ function clearQuickActions() {
 // ============================================================
 // BUILD CONTENT HTML
 // ============================================================
+
+/**
+ * Builds the step-by-step election process HTML.
+ *
+ * @param {Object} data - Country election data object
+ * @returns {string} HTML string with step cards
+ */
 function buildSteps(data) {
   let html = `<h2>📋 Step-by-Step: ${data.name} Election Process</h2>`;
   data.steps.forEach((s, i) => {
@@ -220,6 +339,12 @@ function buildSteps(data) {
   return html;
 }
 
+/**
+ * Builds the election timeline HTML.
+ *
+ * @param {Object} data - Country election data object
+ * @returns {string} HTML string with timeline items
+ */
 function buildTimeline(data) {
   let html = `<h2>⏱️ Election Timeline — ${data.name}</h2>
     <div class="timeline">`;
@@ -234,6 +359,12 @@ function buildTimeline(data) {
   return html;
 }
 
+/**
+ * Builds the eligibility check HTML.
+ *
+ * @param {Object} data - Country election data object
+ * @returns {string} HTML string with eligibility info card
+ */
 function buildEligibility(data) {
   const e = data.eligibility;
   let html = `<h2>✅ Eligibility Check — ${data.name}</h2>
@@ -252,6 +383,12 @@ function buildEligibility(data) {
   return html;
 }
 
+/**
+ * Builds the how-to-vote guide HTML with checklist.
+ *
+ * @param {Object} data - Country election data object
+ * @returns {string} HTML string with voting method and checklist
+ */
 function buildHowToVote(data) {
   let html = `<h2>🗳️ How to Vote — ${data.name}</h2>
     <h3>Voting Method</h3>
@@ -269,6 +406,12 @@ function buildHowToVote(data) {
   return html;
 }
 
+/**
+ * Builds a comprehensive election overview HTML.
+ *
+ * @param {Object} data - Country election data object
+ * @returns {string} HTML string with full overview
+ */
 function buildFullOverview(data) {
   let html = `<h2>🏛️ Full Election Overview — ${data.name}</h2>
     <div class="info-card">
@@ -317,12 +460,19 @@ function showCountrySelection(callback) {
         const key = btn.dataset.country;
         currentCountry = key;
         addUserMessage(ELECTION_DATA[key].name);
+        if (analytics) { analytics.logCountrySelected(key, ELECTION_DATA[key].name); }
         callback(key);
       });
     });
   }, 500);
 }
 
+/**
+ * Returns the election data for the currently selected country.
+ * Falls back to general data if no country is selected.
+ *
+ * @returns {Object} Country election data
+ */
 function getCountryData() {
   return ELECTION_DATA[currentCountry] || ELECTION_DATA.general;
 }
@@ -330,6 +480,9 @@ function getCountryData() {
 // ============================================================
 // MAIN MENU
 // ============================================================
+/**
+ * Displays the main topic menu as quick action buttons.
+ */
 function showMainMenu() {
   conversationState = 'menu';
   const actions = [
@@ -343,8 +496,14 @@ function showMainMenu() {
   setQuickActions(actions);
 }
 
+/**
+ * Handles a topic selection, builds content, and displays it.
+ *
+ * @param {('full'|'steps'|'timeline'|'vote'|'eligibility')} topic - Topic identifier
+ */
 function handleTopic(topic) {
   const data = getCountryData();
+  if (analytics) { analytics.logTopicViewed(topic, currentCountry); }
   let html = '';
   switch (topic) {
     case 'full': html = buildFullOverview(data); break;
@@ -360,6 +519,10 @@ function handleTopic(topic) {
   }, 1400);
 }
 
+/**
+ * Initiates the country selection flow.
+ * Clears current actions and presents country options.
+ */
 function startCountryFlow() {
   clearQuickActions();
   conversationState = 'country-select';
@@ -372,6 +535,13 @@ function startCountryFlow() {
 // ============================================================
 // NATURAL LANGUAGE HANDLER
 // ============================================================
+
+/**
+ * Processes free-text user input using keyword-based NLP.
+ * Detects country mentions and routes to appropriate topic handlers.
+ *
+ * @param {string} text - The user's raw input text
+ */
 function handleFreeText(text) {
   const lower = text.toLowerCase();
 
@@ -440,17 +610,48 @@ function handleFreeText(text) {
 // ============================================================
 // INPUT HANDLING
 // ============================================================
+
+/**
+ * Handles sending a user message. Validates input, checks rate limits,
+ * logs analytics, and routes to the NLP handler.
+ */
 function handleSend() {
-  const text = userInput.value.trim();
-  if (!text) return;
+  const raw = userInput.value;
+
+  // Validate input
+  if (inputValidator) {
+    const result = inputValidator.validate(raw);
+    if (!result.valid) {
+      if (result.error === 'Input is too short') { return; }
+      addBotMessage(`<p>⚠️ ${escapeHTML(result.error)}. Please try a shorter message.</p>`, 200);
+      return;
+    }
+  } else {
+    if (!raw.trim()) { return; }
+  }
+
+  // Check rate limit
+  if (rateLimiter && !rateLimiter.isAllowed()) {
+    addBotMessage('<p>⏳ You\'re sending messages too quickly. Please wait a moment.</p>', 200);
+    return;
+  }
+
+  const text = raw.trim();
   userInput.value = '';
   addUserMessage(text);
+
+  // Log analytics
+  if (analytics) { analytics.logMessageSent(text.length); }
+
   handleFreeText(text);
 }
 
 btnSend.addEventListener('click', handleSend);
-userInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter') handleSend();
+userInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    handleSend();
+  }
 });
 
 btnReset.addEventListener('click', () => {
@@ -458,12 +659,19 @@ btnReset.addEventListener('click', () => {
   clearQuickActions();
   currentCountry = null;
   conversationState = 'welcome';
+  if (rateLimiter) { rateLimiter.reset(); }
+  if (analytics) { analytics.logEvent('reset_clicked'); }
   startApp();
 });
 
 // ============================================================
 // BOOT
 // ============================================================
+
+/**
+ * Initializes the application, displays the welcome message,
+ * and starts the country selection flow.
+ */
 function startApp() {
   const welcomeHTML = `
     <h2>Hi! 👋 Welcome to Election Guide</h2>
@@ -474,4 +682,35 @@ function startApp() {
   setTimeout(() => startCountryFlow(), 1000);
 }
 
+// Start the application
 startApp();
+
+// ============================================================
+// EXPORT TO GLOBAL SCOPE (for testing and external access)
+// ============================================================
+if (typeof globalThis !== 'undefined') {
+  globalThis.ELECTION_DATA = ELECTION_DATA;
+  globalThis.addMessage = addMessage;
+  globalThis.addBotMessage = addBotMessage;
+  globalThis.addUserMessage = addUserMessage;
+  globalThis.showTyping = showTyping;
+  globalThis.hideTyping = hideTyping;
+  globalThis.scrollToBottom = scrollToBottom;
+  globalThis.escapeHTML = escapeHTML;
+  globalThis.announceToScreenReader = announceToScreenReader;
+  globalThis.setQuickActions = setQuickActions;
+  globalThis.clearQuickActions = clearQuickActions;
+  globalThis.buildSteps = buildSteps;
+  globalThis.buildTimeline = buildTimeline;
+  globalThis.buildEligibility = buildEligibility;
+  globalThis.buildHowToVote = buildHowToVote;
+  globalThis.buildFullOverview = buildFullOverview;
+  globalThis.getCountryData = getCountryData;
+  globalThis.handleSend = handleSend;
+  globalThis.handleFreeText = handleFreeText;
+  globalThis.handleTopic = handleTopic;
+  globalThis.showMainMenu = showMainMenu;
+  globalThis.startCountryFlow = startCountryFlow;
+  globalThis.startApp = startApp;
+}
+

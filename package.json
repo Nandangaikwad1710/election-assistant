@@ -1,0 +1,34 @@
+{
+  "name": "election-guide",
+  "version": "1.0.0",
+  "description": "An interactive, accessible Election Process Assistant that helps users understand how elections work step-by-step across multiple countries.",
+  "main": "app.js",
+  "scripts": {
+    "test": "jest --verbose",
+    "test:coverage": "jest --coverage --verbose",
+    "test:watch": "jest --watch",
+    "lint": "eslint . --ext .js --ignore-path .gitignore",
+    "lint:fix": "eslint . --ext .js --fix --ignore-path .gitignore",
+    "validate": "npm run lint && npm run test:coverage"
+  },
+  "keywords": [
+    "election",
+    "voting",
+    "civic-education",
+    "accessibility",
+    "interactive-assistant",
+    "firebase"
+  ],
+  "author": "Nandan Gaikwad",
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "@testing-library/jest-dom": "^6.6.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nandangaikwad1710/election-assistant.git"
+  }
+}
